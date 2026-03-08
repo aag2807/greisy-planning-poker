@@ -15,14 +15,14 @@ export async function GET(
     return new Response('Missing participantId', { status: 400 });
   }
 
-  if (!store.roomExists(id)) {
+  if (!(await store.roomExists(id))) {
     return new Response('Room not found', { status: 404 });
   }
 
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
-    start(controller) {
+    async start(controller) {
       store.connect(id, participantId);
 
       const send = (type: string, data: unknown) => {
@@ -36,7 +36,7 @@ export async function GET(
       };
 
       // Send initial state
-      const room = store.getRoom(id);
+      const room = await store.getRoom(id);
       if (room) send('state', room);
 
       // Subscribe to state updates
@@ -44,7 +44,7 @@ export async function GET(
         send('state', room);
       });
 
-      // Subscribe to events (nudges, etc.)
+      // Subscribe to events (nudges, reactions, etc.)
       const unsubEvents = store.subscribeEvents(id, (event) => {
         send(event.type as string, event);
       });

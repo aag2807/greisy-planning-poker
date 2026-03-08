@@ -17,11 +17,18 @@ interface ThrowData {
   item: string;
 }
 
+interface ReactionData {
+  from: string;
+  fromId: string;
+  emoji: string;
+}
+
 export function useRoom(roomId: string, participantId: string | null) {
   const [room, setRoom] = useState<Room | null>(null);
   const [connected, setConnected] = useState(false);
   const [nudge, setNudge] = useState<NudgeData | null>(null);
   const [throwEvent, setThrowEvent] = useState<ThrowData | null>(null);
+  const [reaction, setReaction] = useState<ReactionData | null>(null);
   const [kicked, setKicked] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -58,6 +65,9 @@ export function useRoom(roomId: string, participantId: string | null) {
           } else if (message.type === 'throw') {
             setThrowEvent(message.data);
             setTimeout(() => setThrowEvent(null), 2000);
+          } else if (message.type === 'reaction') {
+            setReaction({ ...message.data, _ts: Date.now() });
+            setTimeout(() => setReaction(null), 3000);
           } else if (message.type === 'kicked') {
             if (message.data.participantId === participantId) {
               setKicked(true);
@@ -116,6 +126,10 @@ export function useRoom(roomId: string, participantId: string | null) {
       doAction('throw', { fromId: participantId, toId, item }),
     [doAction, participantId]
   );
+  const sendReaction = useCallback(
+    (emoji: string) => doAction('react', { emoji }),
+    [doAction]
+  );
   const kickParticipant = useCallback(
     (targetId: string) => doAction('kick', { targetId }),
     [doAction]
@@ -131,12 +145,14 @@ export function useRoom(roomId: string, participantId: string | null) {
     connected,
     nudge,
     throwEvent,
+    reaction,
     kicked,
     vote,
     reveal,
     reset,
     nudgeParticipant,
     throwItem,
+    sendReaction,
     kickParticipant,
     setTopic,
     leave,

@@ -20,7 +20,9 @@ interface InternalParticipant {
   name: string;
   color: string;
   isHost: boolean;
+  isSpectator: boolean;
   vote: string | null;
+  voteChanged: boolean;
   connections: number;
 }
 
@@ -42,6 +44,56 @@ if (!g.__ppEventListeners) g.__ppEventListeners = new Map();
 const rooms = g.__ppRooms;
 const stateListeners = g.__ppStateListeners;
 const eventListeners = g.__ppEventListeners;
+
+// --- Redis Persistence (optional) ---
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let redis: any = null;
+
+async function initRedis() {
+  if (redis) return redis;
+  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) return null;
+  try {
+    const { Redis } = await import('@upstash/redis');
+    redis = new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    });
+    return redis;
+  } catch {
+    return null;
+  }
+}
+
+async function persistRoom(room: InternalRoom) {
+  const r = await initRedis();
+  if (!r) return;
+  try {
+    await r.set(`room:${room.id}`, JSON.stringify(room), { ex: 86400 }); // 24h TTL
+  } catch { /* silently fail */ }
+}
+
+async function loadRoom(roomId: string): Promise<InternalRoom | null> {
+  const r = await initRedis();
+  if (!r) return null;
+  try {
+    const data = await r.get(`room:${roomId}`);
+    if (!data) return null;
+    const room: InternalRoom = typeof data === 'string' ? JSON.parse(data) : data as InternalRoom;
+    // Reset connections on load (no one is connected after cold start)
+    for (const p of room.participants) {
+      p.connections = 0;
+    }
+    rooms.set(roomId, room);
+    return room;
+  } catch { return null; }
+}
+
+async function deletePersistedRoom(roomId: string) {
+  const r = await initRedis();
+  if (!r) return;
+  try { await r.del(`room:${roomId}`); } catch { /* silently fail */ }
+}
 
 // --- Helpers ---
 
@@ -66,8 +118,10 @@ function toPublicRoom(room: InternalRoom): Room {
       name: p.name,
       color: p.color,
       isHost: p.isHost,
+      isSpectator: p.isSpectator,
       hasVoted: p.vote !== null,
       vote: room.revealed ? p.vote : null,
+      voteChanged: p.voteChanged,
       isOnline: p.connections > 0,
     })),
     currentRound: {
@@ -108,6 +162,27 @@ function emitEvent(roomId: string, event: Record<string, unknown>) {
   }
 }
 
+function checkAutoReveal(room: InternalRoom) {
+  // Only auto-reveal if not already revealed
+  if (room.revealed) return;
+
+  // Get online, non-spectator participants
+  const voters = room.participants.filter(
+    (p) => !p.isSpectator && p.connections > 0
+  );
+
+  // Need at least 1 voter
+  if (voters.length === 0) return;
+
+  // Check if all voters have voted
+  const allVoted = voters.every((p) => p.vote !== null);
+  if (allVoted) {
+    room.revealed = true;
+    notifyState(room.id);
+    persistRoom(room);
+  }
+}
+
 // --- Store API ---
 
 export const store = {
@@ -131,7 +206,9 @@ export const store = {
           name: hostName,
           color: PARTICIPANT_COLORS[0],
           isHost: true,
+          isSpectator: false,
           vote: null,
+          voteChanged: false,
           connections: 0,
         },
       ],
@@ -142,27 +219,35 @@ export const store = {
     };
 
     rooms.set(roomId, room);
+    persistRoom(room);
     return { roomId, participantId };
   },
 
-  getRoom(roomId: string): Room | null {
-    const room = rooms.get(roomId);
+  async getRoom(roomId: string): Promise<Room | null> {
+    let room = rooms.get(roomId);
+    if (!room) {
+      room = (await loadRoom(roomId)) ?? undefined;
+    }
     return room ? toPublicRoom(room) : null;
   },
 
-  roomExists(roomId: string): boolean {
-    return rooms.has(roomId);
+  async roomExists(roomId: string): Promise<boolean> {
+    if (rooms.has(roomId)) return true;
+    const loaded = await loadRoom(roomId);
+    return loaded !== null;
   },
 
-  roomHasPassword(roomId: string): boolean {
-    const room = rooms.get(roomId);
+  async roomHasPassword(roomId: string): Promise<boolean> {
+    let room = rooms.get(roomId);
+    if (!room) room = (await loadRoom(roomId)) ?? undefined;
     return room ? !!room.password : false;
   },
 
   joinRoom(
     roomId: string,
     name: string,
-    password?: string
+    password?: string,
+    spectator?: boolean
   ): { participantId: string } | { error: string } {
     const room = rooms.get(roomId);
     if (!room) return { error: 'Room not found' };
@@ -177,11 +262,14 @@ export const store = {
       name,
       color: PARTICIPANT_COLORS[colorIndex],
       isHost: false,
+      isSpectator: !!spectator,
       vote: null,
+      voteChanged: false,
       connections: 0,
     });
 
     notifyState(roomId);
+    persistRoom(room);
     return { participantId };
   },
 
@@ -196,10 +284,19 @@ export const store = {
     if (!room || room.revealed) return;
 
     const participant = room.participants.find((p) => p.id === participantId);
-    if (!participant) return;
+    if (!participant || participant.isSpectator) return;
+
+    // Track vote changes
+    if (participant.vote !== null && participant.vote !== value) {
+      participant.voteChanged = true;
+    }
 
     participant.vote = value;
     notifyState(roomId);
+
+    // Check if all voters have voted -> auto-reveal
+    checkAutoReveal(room);
+    persistRoom(room);
   },
 
   reveal(roomId: string, participantId: string) {
@@ -211,6 +308,7 @@ export const store = {
 
     room.revealed = true;
     notifyState(roomId);
+    persistRoom(room);
   },
 
   reset(roomId: string, participantId: string, topic?: string) {
@@ -249,12 +347,14 @@ export const store = {
     // Reset for new round
     for (const p of room.participants) {
       p.vote = null;
+      p.voteChanged = false;
     }
     room.revealed = false;
     room.currentTopic = topic || '';
     room.roundStartedAt = new Date().toISOString();
 
     notifyState(roomId);
+    persistRoom(room);
   },
 
   setTopic(roomId: string, participantId: string, topic: string) {
@@ -266,6 +366,7 @@ export const store = {
 
     room.currentTopic = topic;
     notifyState(roomId);
+    persistRoom(room);
   },
 
   nudge(roomId: string, fromId: string, toId: string) {
@@ -301,6 +402,21 @@ export const store = {
     });
   },
 
+  react(roomId: string, fromId: string, emoji: string) {
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    const from = room.participants.find((p) => p.id === fromId);
+    if (!from) return;
+
+    emitEvent(roomId, {
+      type: 'reaction',
+      from: from.name,
+      fromId,
+      emoji,
+    });
+  },
+
   kick(roomId: string, hostId: string, targetId: string) {
     const room = rooms.get(roomId);
     if (!room) return;
@@ -320,6 +436,7 @@ export const store = {
     );
 
     notifyState(roomId);
+    persistRoom(room);
   },
 
   leave(roomId: string, participantId: string) {
@@ -341,10 +458,12 @@ export const store = {
       rooms.delete(roomId);
       stateListeners.delete(roomId);
       eventListeners.delete(roomId);
+      deletePersistedRoom(roomId);
       return;
     }
 
     notifyState(roomId);
+    persistRoom(room);
   },
 
   connect(roomId: string, participantId: string) {

@@ -7,13 +7,13 @@ export async function GET(
 ) {
   const { id } = await params;
 
-  if (!store.roomExists(id)) {
+  if (!(await store.roomExists(id))) {
     return NextResponse.json({ error: 'Room not found' }, { status: 404 });
   }
 
   return NextResponse.json({
-    room: store.getRoom(id),
-    hasPassword: store.roomHasPassword(id),
+    room: await store.getRoom(id),
+    hasPassword: await store.roomHasPassword(id),
   });
 }
 
@@ -27,7 +27,7 @@ export async function POST(
 
   switch (action) {
     case 'join': {
-      const result = store.joinRoom(id, data.name, data.password);
+      const result = store.joinRoom(id, data.name, data.password, data.spectator);
       if ('error' in result) {
         return NextResponse.json(result, { status: 400 });
       }
@@ -51,6 +51,10 @@ export async function POST(
     }
     case 'throw': {
       store.throwItem(id, data.fromId, data.toId, data.item);
+      return NextResponse.json({ ok: true });
+    }
+    case 'react': {
+      store.react(id, data.participantId, data.emoji);
       return NextResponse.json({ ok: true });
     }
     case 'kick': {

@@ -3,9 +3,92 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useRoom } from '@/hooks/useRoom';
-import { CARD_VALUES, EMOJI_OPTIONS, Participant } from '@/lib/types';
+import { CARD_VALUES, EMOJI_OPTIONS, REACTION_EMOJIS, Participant } from '@/lib/types';
+import confetti from 'canvas-confetti';
 
 const THROWABLES = ['📄', '🍅', '❄️', '🧸', '💐', '🎾', '✈️', '🧁'];
+
+// =================================================================
+// SOUND EFFECTS (Web Audio API — no files needed)
+// =================================================================
+
+function createAudioCtx() {
+  if (typeof window === 'undefined') return null;
+  return new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+}
+
+let _audioCtx: AudioContext | null = null;
+function getAudio(): AudioContext | null {
+  if (!_audioCtx) _audioCtx = createAudioCtx();
+  return _audioCtx;
+}
+
+function playTone(freq: number, duration: number, type: OscillatorType = 'sine', volume = 0.15) {
+  const ctx = getAudio();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') ctx.resume();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(volume, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(ctx.currentTime);
+  osc.stop(ctx.currentTime + duration);
+}
+
+function playNudgeSound() {
+  playTone(523, 0.1, 'sine', 0.12);
+  setTimeout(() => playTone(659, 0.1, 'sine', 0.12), 100);
+  setTimeout(() => playTone(784, 0.15, 'sine', 0.12), 200);
+}
+
+function playThrowSound() {
+  playTone(200, 0.3, 'sawtooth', 0.08);
+  setTimeout(() => playTone(120, 0.2, 'sawtooth', 0.06), 150);
+}
+
+function playRevealSound() {
+  playTone(440, 0.15, 'sine', 0.1);
+  setTimeout(() => playTone(554, 0.15, 'sine', 0.1), 120);
+  setTimeout(() => playTone(659, 0.2, 'sine', 0.1), 240);
+  setTimeout(() => playTone(880, 0.3, 'sine', 0.12), 360);
+}
+
+function playConsensusSound() {
+  const notes = [523, 659, 784, 1047];
+  notes.forEach((f, i) => setTimeout(() => playTone(f, 0.25, 'sine', 0.1), i * 100));
+}
+
+// =================================================================
+// CONFETTI
+// =================================================================
+
+function fireConsensusConfetti() {
+  const end = Date.now() + 2000;
+  const colors = ['#8b5cf6', '#22d3ee', '#f472b6', '#fbbf24'];
+
+  (function frame() {
+    confetti({
+      particleCount: 3,
+      angle: 60,
+      spread: 55,
+      origin: { x: 0, y: 0.7 },
+      colors,
+    });
+    confetti({
+      particleCount: 3,
+      angle: 120,
+      spread: 55,
+      origin: { x: 1, y: 0.7 },
+      colors,
+    });
+
+    if (Date.now() < end) requestAnimationFrame(frame);
+  })();
+}
 
 // =================================================================
 // POKER CARD
@@ -215,7 +298,7 @@ function VoteCard({
     <motion.div
       className={`
         w-12 h-[68px] sm:w-14 sm:h-20 rounded-lg flex items-center justify-center text-base sm:text-lg font-bold
-        transition-all duration-500
+        transition-all duration-500 relative
         ${
           !participant.hasVoted
             ? 'border-2 border-dashed border-white/10'
@@ -232,6 +315,21 @@ function VoteCard({
       ) : participant.hasVoted ? (
         <span className="text-violet-300/40 text-xs">&#10003;</span>
       ) : null}
+      {/* Vote changed indicator */}
+      {!revealed && participant.voteChanged && participant.hasVoted && (
+        <motion.div
+          className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-amber-400 border border-amber-500/50"
+          initial={{ scale: 0 }}
+          animate={{ scale: 1 }}
+          title="Changed vote"
+        >
+          <motion.div
+            className="w-full h-full rounded-full bg-amber-400"
+            animate={{ scale: [1, 1.4, 1] }}
+            transition={{ duration: 1.5, repeat: Infinity }}
+          />
+        </motion.div>
+      )}
     </motion.div>
   );
 }
@@ -311,8 +409,14 @@ function ParticipantCardUI({
         )}
       </div>
 
-      {/* Vote card */}
-      <VoteCard participant={participant} revealed={revealed} />
+      {/* Vote card or spectator badge */}
+      {participant.isSpectator ? (
+        <div className="w-12 h-[68px] sm:w-14 sm:h-20 rounded-lg flex items-center justify-center border border-dashed border-white/10">
+          <span className="text-[10px] text-white/30">&#128065;</span>
+        </div>
+      ) : (
+        <VoteCard participant={participant} revealed={revealed} />
+      )}
 
       {/* Name */}
       <span className="text-[10px] sm:text-[11px] text-white/60 truncate max-w-[72px] sm:max-w-[80px] text-center leading-tight">
@@ -320,12 +424,15 @@ function ParticipantCardUI({
         {isCurrentUser && (
           <span className="text-white/25 block">(you)</span>
         )}
+        {participant.isSpectator && (
+          <span className="text-cyan-400/40 block text-[8px]">spectator</span>
+        )}
       </span>
 
       {/* Action buttons */}
       {!isCurrentUser && (
         <div className="flex items-center gap-1">
-          {!participant.hasVoted && !revealed && (
+          {!participant.hasVoted && !revealed && !participant.isSpectator && (
             <motion.button
               onClick={onNudge}
               className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/5 hover:bg-white/10 text-white/30 hover:text-white/60 transition-all cursor-pointer"
@@ -413,6 +520,62 @@ function ThrowProjectile({
 }
 
 // =================================================================
+// FLOATING REACTION
+// =================================================================
+
+function FloatingReaction({
+  emoji,
+  from,
+  onComplete,
+}: {
+  emoji: string;
+  from: string;
+  onComplete: () => void;
+}) {
+  const [x] = useState(() => 20 + Math.random() * 60); // random x position %
+
+  useEffect(() => {
+    const timer = setTimeout(onComplete, 2500);
+    return () => clearTimeout(timer);
+  }, [onComplete]);
+
+  return (
+    <motion.div
+      className="fixed z-[55] pointer-events-none select-none flex flex-col items-center"
+      style={{ left: `${x}%` }}
+      initial={{ bottom: 120, opacity: 0, scale: 0.5 }}
+      animate={{ bottom: '70%', opacity: [0, 1, 1, 0], scale: [0.5, 1.2, 1, 0.8] }}
+      transition={{ duration: 2.5, ease: 'easeOut' }}
+    >
+      <span className="text-3xl sm:text-4xl">{emoji}</span>
+      <span className="text-[9px] text-white/40 mt-0.5 whitespace-nowrap">{from}</span>
+    </motion.div>
+  );
+}
+
+// =================================================================
+// REACTION BAR
+// =================================================================
+
+function ReactionBar({ onReact }: { onReact: (emoji: string) => void }) {
+  return (
+    <div className="flex items-center gap-0.5">
+      {REACTION_EMOJIS.map((emoji) => (
+        <motion.button
+          key={emoji}
+          onClick={() => onReact(emoji)}
+          className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg hover:bg-white/10 flex items-center justify-center text-base sm:text-lg transition-all cursor-pointer"
+          whileHover={{ scale: 1.2 }}
+          whileTap={{ scale: 0.8 }}
+        >
+          {emoji}
+        </motion.button>
+      ))}
+    </div>
+  );
+}
+
+// =================================================================
 // VOTE STATISTICS
 // =================================================================
 
@@ -458,7 +621,8 @@ function VoteStatistics({ participants }: { participants: Participant[] }) {
 
     let consensusEmoji = '\u{1F605}';
     let consensusText = 'Mixed opinions';
-    if (agreementPct === 100) {
+    const isConsensus = agreementPct === 100;
+    if (isConsensus) {
       consensusEmoji = '\u{1F3AF}';
       consensusText = 'Perfect consensus!';
     } else if (agreementPct >= 75) {
@@ -476,6 +640,7 @@ function VoteStatistics({ participants }: { participants: Participant[] }) {
       maxCount,
       consensusEmoji,
       consensusText,
+      isConsensus,
       total: voted.length,
     };
   }, [participants]);
@@ -707,6 +872,7 @@ function JoinScreen({
 }) {
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
+  const [spectator, setSpectator] = useState(false);
   const [loading, setLoading] = useState(true);
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState('');
@@ -742,7 +908,12 @@ function JoinScreen({
       const res = await fetch(`/api/rooms/${roomId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'join', name: name.trim(), password }),
+        body: JSON.stringify({
+          action: 'join',
+          name: name.trim(),
+          password,
+          spectator,
+        }),
       });
       const data = await res.json();
       if (data.error) {
@@ -842,6 +1013,25 @@ function JoinScreen({
             </div>
           )}
 
+          {/* Spectator toggle */}
+          <label className="flex items-center gap-2.5 cursor-pointer py-1 group">
+            <div
+              className={`w-9 h-5 rounded-full transition-colors relative ${
+                spectator ? 'bg-cyan-500/60' : 'bg-white/10'
+              }`}
+              onClick={() => setSpectator(!spectator)}
+            >
+              <motion.div
+                className="w-4 h-4 rounded-full bg-white absolute top-0.5 shadow-sm"
+                animate={{ left: spectator ? 18 : 2 }}
+                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+              />
+            </div>
+            <span className="text-[11px] text-white/40 group-hover:text-white/60 transition-colors">
+              Join as spectator (watch only)
+            </span>
+          </label>
+
           {error && (
             <motion.p
               className="text-red-400 text-xs text-center"
@@ -857,7 +1047,11 @@ function JoinScreen({
             disabled={!name.trim() || joining}
             className="w-full py-3 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-600 hover:from-violet-500 hover:to-cyan-500 font-medium text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
           >
-            {joining ? 'Joining...' : 'Join Room'}
+            {joining
+              ? 'Joining...'
+              : spectator
+                ? 'Join as Spectator'
+                : 'Join Room'}
           </button>
         </form>
       </motion.div>
@@ -909,19 +1103,25 @@ export default function RoomClient({ roomId }: { roomId: string }) {
   const [throwAnimations, setThrowAnimations] = useState<
     Array<{ id: string; item: string }>
   >([]);
+  const [floatingReactions, setFloatingReactions] = useState<
+    Array<{ id: string; emoji: string; from: string }>
+  >([]);
   const prevRoundRef = useRef<string | null>(null);
+  const prevRevealedRef = useRef(false);
 
   const {
     room,
     connected,
     nudge,
     throwEvent,
+    reaction,
     kicked,
     vote,
     reveal,
     reset,
     nudgeParticipant,
     throwItem,
+    sendReaction,
     kickParticipant,
     setTopic,
   } = useRoom(roomId, participantId);
@@ -966,7 +1166,29 @@ export default function RoomClient({ roomId }: { roomId: string }) {
     prevRoundRef.current = room.currentRound.startedAt;
   }, [room]);
 
-  // Handle throw events - show animation
+  // Detect reveal -> play sound + confetti on consensus
+  useEffect(() => {
+    if (!room) return;
+    if (room.revealed && !prevRevealedRef.current) {
+      // Just got revealed
+      playRevealSound();
+
+      // Check for consensus
+      const voters = room.participants.filter((p) => p.hasVoted && !p.isSpectator);
+      if (voters.length >= 2) {
+        const allSame = voters.every((p) => p.vote === voters[0].vote);
+        if (allSame) {
+          setTimeout(() => {
+            playConsensusSound();
+            fireConsensusConfetti();
+          }, 600);
+        }
+      }
+    }
+    prevRevealedRef.current = room.revealed;
+  }, [room]);
+
+  // Handle throw events - show animation + sound
   useEffect(() => {
     if (!throwEvent || !participantId) return;
 
@@ -976,14 +1198,13 @@ export default function RoomClient({ roomId }: { roomId: string }) {
     )?.name;
 
     if (isTarget) {
-      // Show projectile animation
+      playThrowSound();
       const animId = `${Date.now()}-${Math.random()}`;
       setThrowAnimations((prev) => [
         ...prev,
         { id: animId, item: throwEvent.item },
       ]);
     } else {
-      // Show toast for observers
       const targetName =
         throwEvent.to === participantId ? 'you' : throwEvent.toName;
       if (throwEvent.from !== myName) {
@@ -994,8 +1215,28 @@ export default function RoomClient({ roomId }: { roomId: string }) {
     }
   }, [throwEvent, participantId, room?.participants]);
 
+  // Handle nudge sound
+  useEffect(() => {
+    if (!nudge) return;
+    playNudgeSound();
+  }, [nudge]);
+
+  // Handle reactions - show floating emoji
+  useEffect(() => {
+    if (!reaction) return;
+    const id = `${Date.now()}-${Math.random()}`;
+    setFloatingReactions((prev) => [
+      ...prev,
+      { id, emoji: reaction.emoji, from: reaction.from },
+    ]);
+  }, [reaction]);
+
   const removeThrowAnimation = useCallback((id: string) => {
     setThrowAnimations((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  const removeFloatingReaction = useCallback((id: string) => {
+    setFloatingReactions((prev) => prev.filter((r) => r.id !== id));
   }, []);
 
   const handleVote = (value: string) => {
@@ -1089,9 +1330,10 @@ export default function RoomClient({ roomId }: { roomId: string }) {
 
   const me = room.participants.find((p) => p.id === participantId);
   const isHost = me?.isHost ?? false;
+  const isSpectator = me?.isSpectator ?? false;
   const someVoted = room.participants.some((p) => p.hasVoted);
   const votedCount = room.participants.filter((p) => p.hasVoted).length;
-  const canVote = !room.revealed;
+  const canVote = !room.revealed && !isSpectator;
 
   return (
     <div className="min-h-[100dvh] flex flex-col relative z-10">
@@ -1187,11 +1429,11 @@ export default function RoomClient({ roomId }: { roomId: string }) {
               <span className="text-[11px] sm:text-xs text-white/30">
                 {room.revealed
                   ? 'Votes revealed'
-                  : `${votedCount}/${room.participants.length} voted`}
+                  : `${votedCount}/${room.participants.filter((p) => !p.isSpectator).length} voted`}
               </span>
               {!room.revealed && someVoted && (
                 <div className="flex -space-x-0.5">
-                  {room.participants.map((p) => (
+                  {room.participants.filter((p) => !p.isSpectator).map((p) => (
                     <div
                       key={p.id}
                       className={`w-1.5 sm:w-2 h-1.5 sm:h-2 rounded-full border border-[#13111C] transition-colors ${
@@ -1276,6 +1518,11 @@ export default function RoomClient({ roomId }: { roomId: string }) {
           }}
         >
           <div className="max-w-4xl mx-auto px-2 py-2.5 sm:px-4 sm:py-4">
+            {/* Reaction bar */}
+            <div className="flex items-center justify-between mb-1.5 sm:mb-2">
+              <ReactionBar onReact={sendReaction} />
+            </div>
+            {/* Cards */}
             <div
               className={`flex items-end justify-start sm:justify-center gap-1 sm:gap-2 overflow-x-auto hide-scrollbar px-1 ${
                 !canVote ? 'opacity-40 pointer-events-none' : ''
@@ -1319,6 +1566,18 @@ export default function RoomClient({ roomId }: { roomId: string }) {
             key={anim.id}
             item={anim.item}
             onComplete={() => removeThrowAnimation(anim.id)}
+          />
+        ))}
+      </AnimatePresence>
+
+      {/* Floating reactions */}
+      <AnimatePresence>
+        {floatingReactions.map((r) => (
+          <FloatingReaction
+            key={r.id}
+            emoji={r.emoji}
+            from={r.from}
+            onComplete={() => removeFloatingReaction(r.id)}
           />
         ))}
       </AnimatePresence>

@@ -18,8 +18,10 @@ export interface Participant {
   name: string;
   color: string;
   isHost: boolean;
+  isSpectator: boolean;
   hasVoted: boolean;
   vote: string | null;
+  voteChanged: boolean;
   isOnline: boolean;
 }
 
@@ -36,6 +38,10 @@ export const CARD_VALUES = ['0', '1', '2', '3', '5', '8', '13', '21', '34', '?',
 export const EMOJI_OPTIONS = [
   '🎉', '🔥', '💯', '🤔', '😅', '🎯', '⚡', '🌟',
   '💪', '🙈', '🦄', '🚀', '💎', '👀', '🤯', '🎪',
+];
+
+export const REACTION_EMOJIS = [
+  '👍', '👎', '😂', '🎉', '❤️', '🤔', '👏', '🙌',
 ];
 
 export const PARTICIPANT_COLORS = [
