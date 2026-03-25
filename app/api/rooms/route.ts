@@ -12,6 +12,6 @@ export async function POST(request: Request) {
     );
   }
 
-  const result = store.createRoom(name, hostName, password || undefined);
+  const result = await store.createRoom(name, hostName, password || undefined);
   return NextResponse.json(result);
 }

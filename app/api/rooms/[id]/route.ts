@@ -27,22 +27,22 @@ export async function POST(
 
   switch (action) {
     case 'join': {
-      const result = store.joinRoom(id, data.name, data.password, data.spectator);
+      const result = await store.joinRoom(id, data.name, data.password, data.spectator);
       if ('error' in result) {
         return NextResponse.json(result, { status: 400 });
       }
       return NextResponse.json(result);
     }
     case 'vote': {
-      store.vote(id, data.participantId, data.value);
+      await store.vote(id, data.participantId, data.value);
       return NextResponse.json({ ok: true });
     }
     case 'reveal': {
-      store.reveal(id, data.participantId);
+      await store.reveal(id, data.participantId);
       return NextResponse.json({ ok: true });
     }
     case 'reset': {
-      store.reset(id, data.participantId, data.topic);
+      await store.reset(id, data.participantId, data.topic);
       return NextResponse.json({ ok: true });
     }
     case 'nudge': {
@@ -58,15 +58,15 @@ export async function POST(
       return NextResponse.json({ ok: true });
     }
     case 'kick': {
-      store.kick(id, data.participantId, data.targetId);
+      await store.kick(id, data.participantId, data.targetId);
       return NextResponse.json({ ok: true });
     }
     case 'leave': {
-      store.leave(id, data.participantId);
+      await store.leave(id, data.participantId);
       return NextResponse.json({ ok: true });
     }
     case 'topic': {
-      store.setTopic(id, data.participantId, data.topic);
+      await store.setTopic(id, data.participantId, data.topic);
       return NextResponse.json({ ok: true });
     }
     default:
