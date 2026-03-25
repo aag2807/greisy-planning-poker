@@ -8,7 +8,7 @@ Real-time planning poker app built for scrum teams. Dark glassmorphism UI with a
 - **Styling**: Tailwind CSS v4 (uses `@theme inline` directive, not `tailwind.config`)
 - **Animations**: Framer Motion
 - **Real-time**: Server-Sent Events (SSE) — NOT WebSockets (Vercel doesn't support long-lived WS)
-- **Persistence**: In-memory store (globalThis pattern) + optional Upstash Redis
+- **Persistence**: In-memory cache (globalThis) + Prisma ORM with Turso (hosted libSQL/SQLite)
 - **Effects**: canvas-confetti, Web Audio API for sounds
 
 ## Architecture
@@ -26,10 +26,13 @@ Real-time planning poker app built for scrum teams. Dark glassmorphism UI with a
 - `useRef<ReturnType<typeof setTimeout>>(undefined)` — TS requires the argument in Next.js 16
 - localStorage stores `pp-{roomId}` → participantId for session persistence
 
-### Redis Persistence (Optional)
-- Set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` env vars to enable
-- Falls back silently to in-memory if not configured
-- Rooms persist with 24h TTL, connections reset to 0 on cold start load
+### Prisma + Turso Persistence
+- Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` env vars for hosted Turso DB
+- Falls back to local SQLite file (`prisma/dev.db`) if Turso env vars are missing
+- `DATABASE_URL` env var used by Prisma CLI commands (`db push`, `studio`)
+- Rooms persist indefinitely (no TTL), connections reset to 0 on cold start load
+- Schema: `Room` + `Participant` tables, history stored as JSON string in `historyJson` column
+- In-memory cache + SSE listeners stay in globalThis (ephemeral, not persisted)
 
 ## File Structure
 ```
@@ -49,7 +52,10 @@ hooks/
   useRoom.ts            — SSE hook with auto-reconnect
 lib/
   types.ts              — Room, Participant, HistoryRound interfaces + constants
-  store.ts              — In-memory room store + Redis persistence
+  store.ts              — In-memory cache + Prisma persistence
+  prisma.ts             — Prisma client singleton with Turso adapter
+prisma/
+  schema.prisma         — Database schema (Room + Participant models)
 public/
   manifest.json         — PWA manifest
   icon.svg              — App icon
@@ -83,4 +89,6 @@ public/
 npm run dev      # Start dev server
 npm run build    # Production build
 npm run lint     # ESLint
+npx prisma db push  # Push schema to Turso (or local SQLite)
+npx prisma studio   # Open Prisma Studio (DB browser)
 ```
