@@ -6,10 +6,15 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "prisma generate",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio"
   },
   "dependencies": {
-    "@upstash/redis": "^1.36.3",
+    "@libsql/client": "^0.17.2",
+    "@prisma/adapter-libsql": "^6.19.2",
+    "@prisma/client": "^6.19.2",
     "canvas-confetti": "^1.9.4",
     "framer-motion": "^12.35.1",
     "next": "16.1.6",
@@ -24,6 +29,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
+    "prisma": "^6.19.2",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

@@ -1,0 +1,36 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Room {
+  id             String        @id
+  name           String
+  password       String?
+  createdAt      String
+  hostId         String
+  currentTopic   String        @default("")
+  roundStartedAt String
+  revealed       Boolean       @default(false)
+  historyJson    String        @default("[]")
+  participants   Participant[]
+}
+
+model Participant {
+  id          String  @id
+  name        String
+  color       String
+  isHost      Boolean @default(false)
+  isSpectator Boolean @default(false)
+  vote        String?
+  voteChanged Boolean @default(false)
+  roomId      String
+  room        Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+}
