@@ -1,4 +1,5 @@
 import { Room, Participant, HistoryRound, PARTICIPANT_COLORS } from './types';
+import { prisma } from './prisma';
 
 // --- Internal Types ---
 
@@ -45,54 +46,110 @@ const rooms = g.__ppRooms;
 const stateListeners = g.__ppStateListeners;
 const eventListeners = g.__ppEventListeners;
 
-// --- Redis Persistence (optional) ---
+// --- Prisma Persistence ---
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let redis: any = null;
-
-async function initRedis() {
-  if (redis) return redis;
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) return null;
+async function loadRoom(roomId: string): Promise<InternalRoom | null> {
   try {
-    const { Redis } = await import('@upstash/redis');
-    redis = new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    const dbRoom = await prisma.room.findUnique({
+      where: { id: roomId },
+      include: { participants: true },
     });
-    return redis;
+    if (!dbRoom) return null;
+    const room: InternalRoom = {
+      id: dbRoom.id,
+      name: dbRoom.name,
+      password: dbRoom.password,
+      createdAt: dbRoom.createdAt,
+      hostId: dbRoom.hostId,
+      currentTopic: dbRoom.currentTopic,
+      roundStartedAt: dbRoom.roundStartedAt,
+      revealed: dbRoom.revealed,
+      history: JSON.parse(dbRoom.historyJson) as HistoryRound[],
+      participants: dbRoom.participants.map((p) => ({
+        id: p.id,
+        name: p.name,
+        color: p.color,
+        isHost: p.isHost,
+        isSpectator: p.isSpectator,
+        vote: p.vote,
+        voteChanged: p.voteChanged,
+        connections: 0, // No one connected after cold load
+      })),
+    };
+    rooms.set(roomId, room);
+    return room;
   } catch {
     return null;
   }
 }
 
-async function persistRoom(room: InternalRoom) {
-  const r = await initRedis();
-  if (!r) return;
+async function persistRoom(room: InternalRoom): Promise<void> {
   try {
-    await r.set(`room:${room.id}`, JSON.stringify(room), { ex: 86400 }); // 24h TTL
-  } catch { /* silently fail */ }
+    await prisma.$transaction([
+      prisma.room.upsert({
+        where: { id: room.id },
+        update: {
+          name: room.name,
+          password: room.password,
+          hostId: room.hostId,
+          currentTopic: room.currentTopic,
+          roundStartedAt: room.roundStartedAt,
+          revealed: room.revealed,
+          historyJson: JSON.stringify(room.history),
+        },
+        create: {
+          id: room.id,
+          name: room.name,
+          password: room.password,
+          createdAt: room.createdAt,
+          hostId: room.hostId,
+          currentTopic: room.currentTopic,
+          roundStartedAt: room.roundStartedAt,
+          revealed: room.revealed,
+          historyJson: JSON.stringify(room.history),
+        },
+      }),
+      prisma.participant.deleteMany({
+        where: {
+          roomId: room.id,
+          id: { notIn: room.participants.map((p) => p.id) },
+        },
+      }),
+      ...room.participants.map((p) =>
+        prisma.participant.upsert({
+          where: { id: p.id },
+          update: {
+            name: p.name,
+            color: p.color,
+            isHost: p.isHost,
+            isSpectator: p.isSpectator,
+            vote: p.vote,
+            voteChanged: p.voteChanged,
+          },
+          create: {
+            id: p.id,
+            name: p.name,
+            color: p.color,
+            isHost: p.isHost,
+            isSpectator: p.isSpectator,
+            vote: p.vote,
+            voteChanged: p.voteChanged,
+            roomId: room.id,
+          },
+        })
+      ),
+    ]);
+  } catch {
+    console.error('Failed to persist room to database');
+  }
 }
 
-async function loadRoom(roomId: string): Promise<InternalRoom | null> {
-  const r = await initRedis();
-  if (!r) return null;
+async function deletePersistedRoom(roomId: string): Promise<void> {
   try {
-    const data = await r.get(`room:${roomId}`);
-    if (!data) return null;
-    const room: InternalRoom = typeof data === 'string' ? JSON.parse(data) : data as InternalRoom;
-    // Reset connections on load (no one is connected after cold start)
-    for (const p of room.participants) {
-      p.connections = 0;
-    }
-    rooms.set(roomId, room);
-    return room;
-  } catch { return null; }
-}
-
-async function deletePersistedRoom(roomId: string) {
-  const r = await initRedis();
-  if (!r) return;
-  try { await r.del(`room:${roomId}`); } catch { /* silently fail */ }
+    await prisma.room.delete({ where: { id: roomId } });
+  } catch {
+    /* room may not exist in DB */
+  }
 }
 
 // --- Helpers ---
@@ -162,7 +219,7 @@ function emitEvent(roomId: string, event: Record<string, unknown>) {
   }
 }
 
-function checkAutoReveal(room: InternalRoom) {
+async function checkAutoReveal(room: InternalRoom) {
   // Only auto-reveal if not already revealed
   if (room.revealed) return;
 
@@ -179,18 +236,18 @@ function checkAutoReveal(room: InternalRoom) {
   if (allVoted) {
     room.revealed = true;
     notifyState(room.id);
-    persistRoom(room);
+    await persistRoom(room);
   }
 }
 
 // --- Store API ---
 
 export const store = {
-  createRoom(
+  async createRoom(
     name: string,
     hostName: string,
     password?: string
-  ): { roomId: string; participantId: string } {
+  ): Promise<{ roomId: string; participantId: string }> {
     const roomId = generateId(6);
     const participantId = generateId(16);
 
@@ -219,7 +276,7 @@ export const store = {
     };
 
     rooms.set(roomId, room);
-    persistRoom(room);
+    await persistRoom(room);
     return { roomId, participantId };
   },
 
@@ -243,13 +300,14 @@ export const store = {
     return room ? !!room.password : false;
   },
 
-  joinRoom(
+  async joinRoom(
     roomId: string,
     name: string,
     password?: string,
     spectator?: boolean
-  ): { participantId: string } | { error: string } {
-    const room = rooms.get(roomId);
+  ): Promise<{ participantId: string } | { error: string }> {
+    let room = rooms.get(roomId);
+    if (!room) room = (await loadRoom(roomId)) ?? undefined;
     if (!room) return { error: 'Room not found' };
     if (room.password && room.password !== password)
       return { error: 'Incorrect password' };
@@ -269,18 +327,23 @@ export const store = {
     });
 
     notifyState(roomId);
-    persistRoom(room);
+    await persistRoom(room);
     return { participantId };
   },
 
-  participantExists(roomId: string, participantId: string): boolean {
-    const room = rooms.get(roomId);
+  async participantExists(
+    roomId: string,
+    participantId: string
+  ): Promise<boolean> {
+    let room = rooms.get(roomId);
+    if (!room) room = (await loadRoom(roomId)) ?? undefined;
     if (!room) return false;
     return room.participants.some((p) => p.id === participantId);
   },
 
-  vote(roomId: string, participantId: string, value: string) {
-    const room = rooms.get(roomId);
+  async vote(roomId: string, participantId: string, value: string) {
+    let room = rooms.get(roomId);
+    if (!room) room = (await loadRoom(roomId)) ?? undefined;
     if (!room || room.revealed) return;
 
     const participant = room.participants.find((p) => p.id === participantId);
@@ -295,12 +358,16 @@ export const store = {
     notifyState(roomId);
 
     // Check if all voters have voted -> auto-reveal
-    checkAutoReveal(room);
-    persistRoom(room);
+    await checkAutoReveal(room);
+    // Only persist here if checkAutoReveal didn't already persist (on reveal)
+    if (!room.revealed) {
+      await persistRoom(room);
+    }
   },
 
-  reveal(roomId: string, participantId: string) {
-    const room = rooms.get(roomId);
+  async reveal(roomId: string, participantId: string) {
+    let room = rooms.get(roomId);
+    if (!room) room = (await loadRoom(roomId)) ?? undefined;
     if (!room) return;
 
     const participant = room.participants.find((p) => p.id === participantId);
@@ -308,11 +375,12 @@ export const store = {
 
     room.revealed = true;
     notifyState(roomId);
-    persistRoom(room);
+    await persistRoom(room);
   },
 
-  reset(roomId: string, participantId: string, topic?: string) {
-    const room = rooms.get(roomId);
+  async reset(roomId: string, participantId: string, topic?: string) {
+    let room = rooms.get(roomId);
+    if (!room) room = (await loadRoom(roomId)) ?? undefined;
     if (!room) return;
 
     const participant = room.participants.find((p) => p.id === participantId);
@@ -354,11 +422,12 @@ export const store = {
     room.roundStartedAt = new Date().toISOString();
 
     notifyState(roomId);
-    persistRoom(room);
+    await persistRoom(room);
   },
 
-  setTopic(roomId: string, participantId: string, topic: string) {
-    const room = rooms.get(roomId);
+  async setTopic(roomId: string, participantId: string, topic: string) {
+    let room = rooms.get(roomId);
+    if (!room) room = (await loadRoom(roomId)) ?? undefined;
     if (!room) return;
 
     const participant = room.participants.find((p) => p.id === participantId);
@@ -366,7 +435,7 @@ export const store = {
 
     room.currentTopic = topic;
     notifyState(roomId);
-    persistRoom(room);
+    await persistRoom(room);
   },
 
   nudge(roomId: string, fromId: string, toId: string) {
@@ -417,8 +486,9 @@ export const store = {
     });
   },
 
-  kick(roomId: string, hostId: string, targetId: string) {
-    const room = rooms.get(roomId);
+  async kick(roomId: string, hostId: string, targetId: string) {
+    let room = rooms.get(roomId);
+    if (!room) room = (await loadRoom(roomId)) ?? undefined;
     if (!room) return;
 
     const host = room.participants.find((p) => p.id === hostId);
@@ -436,11 +506,12 @@ export const store = {
     );
 
     notifyState(roomId);
-    persistRoom(room);
+    await persistRoom(room);
   },
 
-  leave(roomId: string, participantId: string) {
-    const room = rooms.get(roomId);
+  async leave(roomId: string, participantId: string) {
+    let room = rooms.get(roomId);
+    if (!room) room = (await loadRoom(roomId)) ?? undefined;
     if (!room) return;
 
     room.participants = room.participants.filter(
@@ -458,12 +529,12 @@ export const store = {
       rooms.delete(roomId);
       stateListeners.delete(roomId);
       eventListeners.delete(roomId);
-      deletePersistedRoom(roomId);
+      await deletePersistedRoom(roomId);
       return;
     }
 
     notifyState(roomId);
-    persistRoom(room);
+    await persistRoom(room);
   },
 
   connect(roomId: string, participantId: string) {
