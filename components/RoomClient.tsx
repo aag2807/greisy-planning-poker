@@ -361,7 +361,7 @@ function ParticipantCardUI({
 
   return (
     <motion.div
-      className={`flex flex-col items-center gap-1.5 sm:gap-2 p-2.5 sm:p-4 rounded-2xl transition-all relative ${
+      className={`group flex flex-col items-center gap-1.5 sm:gap-2 p-2.5 sm:p-4 rounded-2xl transition-all relative ${
         isCurrentUser ? 'bg-white/[0.04] ring-1 ring-white/10' : ''
       } ${!participant.isOnline && !isCurrentUser ? 'opacity-50' : ''}`}
       layout
@@ -377,11 +377,8 @@ function ParticipantCardUI({
       {isHost && !isCurrentUser && (
         <button
           onClick={onKick}
-          className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500/60 hover:bg-red-500 text-[9px] flex items-center justify-center cursor-pointer transition-all opacity-0 hover:opacity-100 group-hover:opacity-100 z-10 text-white/80"
+          className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500/60 hover:bg-red-500 text-[9px] flex items-center justify-center cursor-pointer transition-all opacity-0 group-hover:opacity-100 z-10 text-white/80"
           title={`Remove ${participant.name}`}
-          style={{ opacity: undefined }}
-          onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.3')}
         >
           &#10005;
         </button>

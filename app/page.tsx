@@ -171,7 +171,7 @@ export default function Home() {
                 onClick={() => setShowPassword(!showPassword)}
                 className="text-[11px] text-white/30 hover:text-white/50 transition-colors flex items-center gap-1 cursor-pointer"
               >
-                {showPassword ? '&#128275;' : '&#128274;'}{' '}
+                {showPassword ? '🔓' : '🔒'}{' '}
                 {showPassword ? 'Remove password' : 'Add password (optional)'}
               </button>
 
